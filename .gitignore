@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# 출력 파일
+output/
+batch_output*/
+test_output/
+*.log
+
+# 설정 파일 (로컬 설정)
+config.json
+calibration.json
+
+# 테스트 이미지
+test_images/
+calibration/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
