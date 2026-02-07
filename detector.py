@@ -1,6 +1,6 @@
 """
 솔더 페이스트 검출 엔진
-HSV 색상 범위 기반 마스크 생성, 윤곽선 검출 및 필터링
+3D 높이 맵 기반 검출 또는 HSV 색상 범위 기반 검출
 """
 
 import cv2 as cv
@@ -8,19 +8,26 @@ import numpy as np
 from image_processor import create_mask_from_hsv, apply_morphology
 
 
-def detect_solder_paste(hsv_img, config):
+def detect_solder_paste(img, config):
     """
     솔더 페이스트 영역 검출 메인 함수
 
+    3D 높이 맵 모드: Blue channel을 높이로 해석하여 검출
+    2D 색상 모드: HSV 색상 범위 기반 검출
+
     Args:
-        hsv_img (numpy.ndarray): HSV 형식 이미지
+        img (numpy.ndarray): BGR 또는 HSV 형식 이미지
         config: 설정 객체 (Config 클래스)
 
     Returns:
         tuple: (검출된 윤곽선 리스트, 이진 마스크)
     """
-    # 1. 색상 범위 기반 마스크 생성
-    mask = create_mask_from_hsv(hsv_img, config.LOWER_HSV, config.UPPER_HSV)
+    if config.HEIGHT_MAP_MODE:
+        # 3D 높이 맵 모드: Blue channel 기반 검출
+        mask = create_height_mask(img, config.HEIGHT_THRESHOLD_MIN, config.HEIGHT_THRESHOLD_MAX)
+    else:
+        # 2D 색상 모드: HSV 기반 검출
+        mask = create_mask_from_hsv(img, config.LOWER_HSV, config.UPPER_HSV)
 
     # 2. 형태학적 연산 (노이즈 제거)
     # Opening: 작은 노이즈 제거
@@ -36,6 +43,32 @@ def detect_solder_paste(hsv_img, config):
     filtered_contours = filter_contours(contours, config)
 
     return filtered_contours, mask
+
+
+def create_height_mask(img, min_height, max_height):
+    """
+    3D 높이 맵에서 높이 기반 마스크 생성
+
+    Blue channel 값을 높이로 해석:
+    - 파란색 = 높음 (높은 경사)
+    - 초록색 = 중간
+    - 빨강색 = 낮음 (낮은 경사)
+
+    Args:
+        img (numpy.ndarray): BGR 이미지 (3D 높이 맵)
+        min_height (int): 최소 높이 임계값 (0-255)
+        max_height (int): 최대 높이 임계값 (0-255)
+
+    Returns:
+        numpy.ndarray: 이진 마스크 (높이 범위 내 = 255, 외부 = 0)
+    """
+    # Blue channel 추출 (BGR 이미지이므로 index 0)
+    blue_channel = img[:, :, 0]
+
+    # 높이 임계값 적용
+    mask = cv.inRange(blue_channel, min_height, max_height)
+
+    return mask
 
 
 def find_contours(binary_img):

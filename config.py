@@ -18,17 +18,28 @@ class Config:
         Args:
             config_path (str, optional): 설정 파일 경로. 없으면 기본값 사용
         """
-        # HSV 색상 범위 (솔더 페이스트: 회색-은색)
+        # ===== 3D 높이 맵 모드 설정 =====
+        # True: 3D 높이 맵 이미지 (RGB = 높이 정보)
+        # False: 일반 2D 색상 이미지
+        self.HEIGHT_MAP_MODE = True
+
+        # 높이 임계값 (Blue channel 값, 0-255)
+        # Blue 값이 이 값 이상이면 솔더 페이스트로 인식
+        # 파란색 = 높음, 초록색 = 중간, 빨강 = 낮음
+        self.HEIGHT_THRESHOLD_MIN = 100  # 최소 높이
+        self.HEIGHT_THRESHOLD_MAX = 255  # 최대 높이
+
+        # HSV 색상 범위 (2D 색상 모드용, HEIGHT_MAP_MODE=False일 때 사용)
         # 주의: 실제 이미지에 맞춰 조정 필요
         self.LOWER_HSV = np.array([0, 0, 180])
         self.UPPER_HSV = np.array([20, 50, 255])
 
         # 면적 필터 (픽셀²)
-        self.MIN_AREA = 100
-        self.MAX_AREA = 50000
+        self.MIN_AREA = 50   # 작은 노이즈 제거용
+        self.MAX_AREA = 100000  # 비정상적으로 큰 영역 제외
 
         # 원형도 필터 (0.0 ~ 1.0, 1.0은 완전한 원)
-        self.MIN_CIRCULARITY = 0.5
+        self.MIN_CIRCULARITY = 0.3  # 3D 높이 맵에서는 더 낮게 설정
         self.MAX_CIRCULARITY = 1.0
 
         # 형태학적 연산 커널 크기
@@ -67,6 +78,16 @@ class Config:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_dict = json.load(f)
+
+            # 높이 맵 모드
+            if 'height_map_mode' in config_dict:
+                self.HEIGHT_MAP_MODE = config_dict['height_map_mode']
+
+            # 높이 임계값
+            if 'height_threshold_min' in config_dict:
+                self.HEIGHT_THRESHOLD_MIN = config_dict['height_threshold_min']
+            if 'height_threshold_max' in config_dict:
+                self.HEIGHT_THRESHOLD_MAX = config_dict['height_threshold_max']
 
             # HSV 범위
             if 'lower_hsv' in config_dict:
@@ -108,6 +129,9 @@ class Config:
             config_path (str): 저장할 파일 경로
         """
         config_dict = {
+            'height_map_mode': self.HEIGHT_MAP_MODE,
+            'height_threshold_min': self.HEIGHT_THRESHOLD_MIN,
+            'height_threshold_max': self.HEIGHT_THRESHOLD_MAX,
             'lower_hsv': self.LOWER_HSV.tolist(),
             'upper_hsv': self.UPPER_HSV.tolist(),
             'min_area': self.MIN_AREA,
@@ -133,7 +157,11 @@ class Config:
         print("\n" + "="*50)
         print("현재 설정")
         print("="*50)
-        print(f"HSV 범위: {self.LOWER_HSV} ~ {self.UPPER_HSV}")
+        print(f"3D 높이 맵 모드: {'ON' if self.HEIGHT_MAP_MODE else 'OFF'}")
+        if self.HEIGHT_MAP_MODE:
+            print(f"높이 임계값: {self.HEIGHT_THRESHOLD_MIN} ~ {self.HEIGHT_THRESHOLD_MAX}")
+        else:
+            print(f"HSV 범위: {self.LOWER_HSV} ~ {self.UPPER_HSV}")
         print(f"면적 필터: {self.MIN_AREA} ~ {self.MAX_AREA} pixels²")
         print(f"원형도 필터: {self.MIN_CIRCULARITY} ~ {self.MAX_CIRCULARITY}")
         print(f"캘리브레이션: {self.PIXELS_PER_MM} pixels/mm")
