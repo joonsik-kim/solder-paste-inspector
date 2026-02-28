@@ -29,6 +29,14 @@ class Config:
         self.HEIGHT_THRESHOLD_MIN = 100  # 최소 높이
         self.HEIGHT_THRESHOLD_MAX = 255  # 최대 높이
 
+        # 검출 방법 선택 (HEIGHT_MAP_MODE=True일 때)
+        # 'ensemble': 앙상블 투표 (권장, 가장 안정적)
+        # 'otsu_blue': Blue 채널 Otsu 반전 (최고 평균 IoU)
+        # 'clahe_blue': CLAHE + Blue Otsu 반전 (불균일 조명에 강함)
+        # 'adaptive': 적응형 임계값 (국소 변화에 강함)
+        # 'legacy': 기존 방식 (단순 Blue 채널 범위)
+        self.DETECTION_METHOD = 'ensemble'
+
         # HSV 색상 범위 (2D 색상 모드용, HEIGHT_MAP_MODE=False일 때 사용)
         # 주의: 실제 이미지에 맞춰 조정 필요
         self.LOWER_HSV = np.array([0, 0, 180])
@@ -83,6 +91,10 @@ class Config:
             if 'height_map_mode' in config_dict:
                 self.HEIGHT_MAP_MODE = config_dict['height_map_mode']
 
+            # 검출 방법
+            if 'detection_method' in config_dict:
+                self.DETECTION_METHOD = config_dict['detection_method']
+
             # 높이 임계값
             if 'height_threshold_min' in config_dict:
                 self.HEIGHT_THRESHOLD_MIN = config_dict['height_threshold_min']
@@ -130,6 +142,7 @@ class Config:
         """
         config_dict = {
             'height_map_mode': self.HEIGHT_MAP_MODE,
+            'detection_method': self.DETECTION_METHOD,
             'height_threshold_min': self.HEIGHT_THRESHOLD_MIN,
             'height_threshold_max': self.HEIGHT_THRESHOLD_MAX,
             'lower_hsv': self.LOWER_HSV.tolist(),
