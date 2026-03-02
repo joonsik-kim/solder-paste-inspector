@@ -45,7 +45,10 @@ def process_single_image(image_path, config, output_dir=None, show_results=True)
     hsv, resized = preprocess_image(img, config)
 
     # 3. 검출
-    contours, mask = detect_solder_paste(hsv, config)
+    # 3D 높이 맵 모드: 원본 이미지 사용 (Blue channel = 높이)
+    # 2D 색상 모드: HSV 이미지 사용
+    detect_input = resized if config.HEIGHT_MAP_MODE else hsv
+    contours, mask = detect_solder_paste(detect_input, config)
     print(f"  검출된 윤곽선 수: {len(contours)}")
 
     if not contours:

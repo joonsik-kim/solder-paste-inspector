@@ -1,17 +1,31 @@
 # 솔더 페이스트 면적 측정 프로그램
 
-OpenCV를 사용하여 AOI 이미지에서 솔더 페이스트를 검출하고 면적을 측정하는 프로그램입니다.
+OpenCV를 사용하여 AOI/SPI 3D 높이 맵 이미지에서 솔더 페이스트를 검출하고 면적을 측정하는 프로그램입니다.
+
+## 🎯 이미지 타입
+
+### **3D 높이 맵 (Height Map)** ⭐ 현재 지원
+AOI/SPI 광학 검사에서 생성된 RGB 높이 정보 이미지:
+- **파란색 (Blue)**: 높은 경사/높이
+- **초록색 (Green)**: 중간 경사/높이
+- **빨간색 (Red)**: 낮은 경사/높이
+- ROI(Region of Interest)로 잘린 솔더 페이스트 영역
+
+### 일반 2D 색상 이미지
+기존 RGB 카메라로 촬영한 일반 이미지 (설정으로 전환 가능)
 
 ## 📋 기능
 
 ### Phase 1 (현재)
-- ✅ RGB 2D 이미지에서 솔더 페이스트 검출
-- ✅ 검출된 영역의 면적 측정 (픽셀 → mm² 변환)
+- ✅ **3D 높이 맵에서 솔더 페이스트 검출** (Blue channel 기반)
+- ✅ 검출된 영역의 **면적 측정** (픽셀 → mm² 변환)
 - ✅ 측정 결과 시각화 및 저장
-- ✅ 배치 처리 지원
+- ✅ 배치 처리 지원 (대량 이미지 처리)
 - ✅ 카메라 캘리브레이션 도구
+- ✅ 2D 색상 모드 / 3D 높이 맵 모드 전환
 
 ### Phase 2 (추후 예정)
+- 🔲 **3D 부피 측정** (면적 × 평균 높이)
 - 🔲 실장 필렛 검사
 - 🔲 품질 판정 기준 적용
 
@@ -91,11 +105,12 @@ python main.py -i test.jpg -o output/ --no-display
 
 ```json
 {
-  "lower_hsv": [0, 0, 180],
-  "upper_hsv": [20, 50, 255],
-  "min_area": 100,
-  "max_area": 50000,
-  "min_circularity": 0.5,
+  "height_map_mode": true,
+  "height_threshold_min": 100,
+  "height_threshold_max": 255,
+  "min_area": 50,
+  "max_area": 100000,
+  "min_circularity": 0.3,
   "max_circularity": 1.0,
   "pixels_per_mm": 10.0,
   "resize_scale": 1.0
@@ -103,15 +118,46 @@ python main.py -i test.jpg -o output/ --no-display
 ```
 
 **주요 파라미터**:
-- `lower_hsv`, `upper_hsv`: HSV 색상 범위 (솔더 페이스트 색상)
+
+**3D 높이 맵 모드** (기본):
+- `height_map_mode`: true (3D 높이 맵) / false (2D 색상)
+- `height_threshold_min`, `height_threshold_max`: Blue channel 높이 임계값 (0-255)
+  - 100-255: 중간~높은 높이만 검출
+  - 50-255: 낮은 높이도 포함
+
+**2D 색상 모드** (height_map_mode: false):
+- `lower_hsv`, `upper_hsv`: HSV 색상 범위
+
+**공통**:
 - `min_area`, `max_area`: 면적 필터 (픽셀²)
 - `min_circularity`, `max_circularity`: 원형도 필터 (0.0 ~ 1.0)
 - `pixels_per_mm`: 캘리브레이션 값
 - `resize_scale`: 이미지 리사이징 비율
 
-### HSV 색상 범위 조정
+### 높이 임계값 조정 (3D 높이 맵)
 
-솔더 페이스트 종류별로 색상이 다르므로 실제 이미지로 조정 필요:
+실제 이미지로 높이 임계값 조정 필요:
+
+1. 테스트 이미지로 실행
+2. 검출 결과 확인
+3. `config.json`의 `height_threshold_min` 조정
+4. 재실행하여 검증
+
+**조정 가이드**:
+```
+검출 안됨 (0개)     → height_threshold_min 낮추기 (예: 100 → 50)
+너무 많이 검출됨    → height_threshold_min 높이기 (예: 100 → 150)
+배경까지 검출됨     → height_threshold_min 높이기 + min_area 증가
+```
+
+**Blue channel 값 (0-255)**:
+- 200-255: 매우 높은 높이 (밝은 파란색)
+- 100-200: 중간 높이 (파란색~초록색)
+- 0-100: 낮은 높이 (초록색~빨강색)
+
+### HSV 색상 범위 조정 (2D 색상 모드)
+
+`height_map_mode: false`로 설정 시:
 
 1. 테스트 이미지로 실행
 2. 검출 결과 확인

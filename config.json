@@ -1,0 +1,16 @@
+{
+    "height_map_mode": true,
+    "detection_method": "ensemble",
+    "height_threshold_min": 100,
+    "height_threshold_max": 255,
+    "lower_hsv": [0, 0, 180],
+    "upper_hsv": [20, 50, 255],
+    "min_area": 50,
+    "max_area": 100000,
+    "min_circularity": 0.3,
+    "max_circularity": 1.0,
+    "morph_kernel_size": [5, 5],
+    "blur_kernel_size": [5, 5],
+    "resize_scale": 1.0,
+    "pixels_per_mm": 10.0
+}
