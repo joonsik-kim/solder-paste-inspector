@@ -1,17 +1,21 @@
 """
 솔더 페이스트 검출 엔진
-3D 높이 맵 기반 검출 또는 HSV 색상 범위 기반 검출
+AOI RGB 조명 이미지 기반 솔더 페이스트 영역 검출
 
-v2: 종합 분석 결과 기반 최적화
-- 330개 방법 IoU 평가 결과 반영
-- Top 1: Otsu_Blue_inv (avg IoU=0.5699)
-- Top 2: CLAHE_Blue_inv (avg IoU=0.5652)
-- 앙상블 방식으로 안정성 향상
+v4: Normalized RGB + 노이즈 제거 기반 검출 개선
+- AOI 이미지 색상 혼합 문제 분석 반영
+  - 이미지 80%가 혼합색, 파란 영역의 77-93%가 G/R 오염
+  - 로컬 노이즈 std=50, 단일 채널 임계값은 본질적 한계
+- 산업용 AOI 표준 Normalized RGB(색상비) 검출 도입
+- Bilateral/NLM 노이즈 제거 전처리 도입
+- 색상 그라데이션 패턴 분석 추가
 """
 
 import cv2 as cv
 import numpy as np
-from image_processor import create_mask_from_hsv, apply_morphology
+from image_processor import (create_mask_from_hsv, apply_morphology,
+                              apply_bilateral_filter, apply_nlm_denoise,
+                              normalize_rgb)
 
 
 def detect_solder_paste(img, config):
@@ -40,12 +44,17 @@ def detect_solder_paste(img, config):
             mask = detect_adaptive_blue(img)
         elif detection_method == 'ensemble':
             mask = detect_ensemble(img)
+        elif detection_method == 'ensemble_v4':
+            mask = detect_ensemble_v4(img)
+        elif detection_method == 'norm_rgb':
+            threshold = getattr(config, 'NORM_RGB_THRESHOLD', 0.4)
+            mask = detect_normalized_rgb(img, target='blue', threshold=threshold)
         elif detection_method == 'legacy':
             # 기존 방식 (하위 호환)
             mask = create_height_mask(img, config.HEIGHT_THRESHOLD_MIN,
                                        config.HEIGHT_THRESHOLD_MAX)
         else:
-            mask = detect_ensemble(img)
+            mask = detect_ensemble_v4(img)
     else:
         # 2D 색상 모드: HSV 기반 검출
         mask = create_mask_from_hsv(img, config.LOWER_HSV, config.UPPER_HSV)
@@ -69,31 +78,23 @@ def detect_solder_paste(img, config):
 
 def detect_otsu_blue_inv(img):
     """
-    [Top 1] Blue 채널 Otsu 반전 (avg IoU=0.5699)
+    Blue 채널 Otsu 반전
 
     Blue 채널에 Otsu 자동 임계값을 적용하고 반전.
     3D 높이 맵에서 Blue=높은 경사이므로, Blue가 낮은 영역이
     솔더 페이스트의 실제 도포 영역에 해당.
-
-    Otsu의 장점:
-    - 히스토그램 기반 자동 임계값 결정
-    - 이미지마다 다른 밝기 분포에 적응적으로 동작
     """
     blue = img[:, :, 0]
     _, mask = cv.threshold(blue, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU)
     return mask
 
 
-def detect_clahe_blue_inv(img, clip_limit=2.0, tile_size=4):
+def detect_clahe_blue_inv(img, clip_limit=4.0, tile_size=4):
     """
-    [Top 2] CLAHE + Blue 채널 Otsu 반전 (avg IoU=0.5652)
+    [안정성 1위] CLAHE + Blue 채널 Otsu 반전 (std=0.010)
 
-    CLAHE(대비 제한 적응형 히스토그램 균등화)로 Blue 채널의
-    국소 대비를 강화한 후 Otsu 적용.
-
-    장점:
-    - 조명이 불균일한 환경에서도 일관된 결과
-    - 어두운 영역의 세부 디테일 향상
+    CLAHE로 Blue 채널의 국소 대비를 강화한 후 Otsu 반전.
+    모든 이미지에서 가장 일관된 결과를 보임 (표준편차 최소).
     """
     blue = img[:, :, 0]
     clahe = cv.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_size, tile_size))
@@ -104,14 +105,13 @@ def detect_clahe_blue_inv(img, clip_limit=2.0, tile_size=4):
 
 def detect_adaptive_blue(img, block_size=7, c_val=10):
     """
-    [Top 7] 적응형 임계값 Blue 채널 (avg IoU=0.5415)
+    적응형 임계값 Blue 채널
 
     지역적 밝기 변화에 대응하는 적응형 임계값.
     조명이 균일하지 않은 실제 검사 환경에 유리.
     """
     blue = img[:, :, 0]
     h, w = blue.shape
-    # block_size가 이미지보다 작아야 함
     bs = min(block_size, min(h, w) - 1)
     if bs % 2 == 0:
         bs -= 1
@@ -124,47 +124,262 @@ def detect_adaptive_blue(img, block_size=7, c_val=10):
 
 def detect_ensemble(img):
     """
-    앙상블 검출: 상위 방법들의 투표 기반 결합
+    앙상블 검출 v3: 안정성 + 높은 IoU 방법 결합
 
-    Top 방법들의 결과를 결합하여 안정성 향상:
-    1. Otsu Blue 반전 (Top 1)
-    2. CLAHE Blue 반전 (Top 2)
-    3. Lab L 임계값 (Top 4)
-    4. HSV Value 임계값 (Top 5)
-    5. Saturation 임계값 (Top 6)
+    v3 분석 결과 반영:
+    1. CLAHE Blue inv cl4.0 (안정성 1위, std=0.010, 가중치 2.0)
+    2. CLAHE Blue inv cl8.0 (안정성 2위, std=0.013, 가중치 1.8)
+    3. Saturation 30-255 (평균 IoU 1위, 가중치 1.2)
+    4. Adaptive Lab_L bs11 c10 (평균 IoU 5위, 가중치 1.0)
+    5. Otsu Blue inv (안정적, 가중치 1.0)
 
-    2개 이상의 방법이 동의하면 검출로 판정.
+    2.5 이상 동의하면 검출로 판정.
     """
     h, w = img.shape[:2]
     votes = np.zeros((h, w), dtype=np.float32)
 
-    # 방법 1: Otsu Blue 반전 (가중치 1.5 - 최고 성능)
-    mask1 = detect_otsu_blue_inv(img)
-    votes += (mask1 > 0).astype(np.float32) * 1.5
+    # 방법 1: CLAHE Blue inv cl4.0 (안정성 1위, 가중치 2.0)
+    mask1 = detect_clahe_blue_inv(img, clip_limit=4.0, tile_size=4)
+    votes += (mask1 > 0).astype(np.float32) * 2.0
 
-    # 방법 2: CLAHE Blue 반전 (가중치 1.3)
-    mask2 = detect_clahe_blue_inv(img)
-    votes += (mask2 > 0).astype(np.float32) * 1.3
+    # 방법 2: CLAHE Blue inv cl8.0 (안정성 2위, 가중치 1.8)
+    mask2 = detect_clahe_blue_inv(img, clip_limit=8.0, tile_size=4)
+    votes += (mask2 > 0).astype(np.float32) * 1.8
 
-    # 방법 3: Lab L 채널 임계값 (가중치 1.0)
+    # 방법 3: Saturation 30-255 (평균 IoU 1위, 가중치 1.2)
+    hsv = cv.cvtColor(img, cv.COLOR_BGR2HSV)
+    s_ch = hsv[:, :, 1]
+    mask3 = cv.inRange(s_ch, 30, 255)
+    votes += (mask3 > 0).astype(np.float32) * 1.2
+
+    # 방법 4: Adaptive Lab_L bs11 c10 (평균 IoU 5위, 가중치 1.0)
     lab = cv.cvtColor(img, cv.COLOR_BGR2Lab)
     l_ch = lab[:, :, 0]
-    mask3 = cv.inRange(l_ch, 0, 150)
-    votes += (mask3 > 0).astype(np.float32) * 1.0
+    bs = min(11, min(h, w) - 1)
+    if bs % 2 == 0:
+        bs -= 1
+    if bs < 3:
+        bs = 3
+    mask4 = cv.adaptiveThreshold(l_ch, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                  cv.THRESH_BINARY, bs, 10)
+    votes += (mask4 > 0).astype(np.float32) * 1.0
 
-    # 방법 4: HSV Value 임계값 (가중치 0.8)
-    hsv = cv.cvtColor(img, cv.COLOR_BGR2HSV)
-    v_ch = hsv[:, :, 2]
-    mask4 = cv.inRange(v_ch, 0, 180)
-    votes += (mask4 > 0).astype(np.float32) * 0.8
+    # 방법 5: Otsu Blue inv (가중치 1.0)
+    mask5 = detect_otsu_blue_inv(img)
+    votes += (mask5 > 0).astype(np.float32) * 1.0
 
-    # 방법 5: Saturation 임계값 (가중치 0.8)
-    s_ch = hsv[:, :, 1]
-    mask5 = cv.inRange(s_ch, 30, 255)
-    votes += (mask5 > 0).astype(np.float32) * 0.8
-
-    # 투표 임계값: 가중합 >= 2.5 (최소 2개 방법 동의)
+    # 투표 임계값: 가중합 >= 2.5
     mask = (votes >= 2.5).astype(np.uint8) * 255
+
+    return mask
+
+
+# ============================================================
+# v4: Normalized RGB + 노이즈 제거 기반 검출
+# ============================================================
+
+def detect_normalized_rgb(img, target='blue', threshold=0.4):
+    """
+    Normalized RGB 검출 (산업용 AOI 표준 방식)
+
+    r = R/(R+G+B), g = G/(R+G+B), b = B/(R+G+B)
+    조명 밝기에 무관하게 색상 비율만으로 영역 판단.
+
+    Args:
+        img: BGR 이미지
+        target: 검출 대상 ('blue', 'red', 'green')
+        threshold: 비율 임계값 (0.0~1.0)
+
+    Returns:
+        numpy.ndarray: 이진 마스크
+    """
+    norm_b, norm_g, norm_r = normalize_rgb(img)
+
+    if target == 'blue':
+        mask = (norm_b >= threshold).astype(np.uint8) * 255
+    elif target == 'red':
+        mask = (norm_r >= threshold).astype(np.uint8) * 255
+    elif target == 'green':
+        mask = (norm_g >= threshold).astype(np.uint8) * 255
+    else:
+        mask = (norm_b >= threshold).astype(np.uint8) * 255
+
+    return mask
+
+
+def detect_norm_rgb_diff(img, pair='b-r', threshold=0.1):
+    """
+    Normalized RGB 차이 기반 검출
+
+    특정 색상이 다른 색상보다 얼마나 우세한지로 판단.
+    예: b-r > 0.1 → Blue 비율이 Red보다 10% 이상 높은 영역
+
+    Args:
+        img: BGR 이미지
+        pair: 'b-r', 'b-g', 'r-g', 'r-b' 등
+        threshold: 차이 임계값
+
+    Returns:
+        numpy.ndarray: 이진 마스크
+    """
+    norm_b, norm_g, norm_r = normalize_rgb(img)
+
+    ch_map = {'b': norm_b, 'g': norm_g, 'r': norm_r}
+    parts = pair.split('-')
+    if len(parts) == 2 and parts[0] in ch_map and parts[1] in ch_map:
+        diff = ch_map[parts[0]] - ch_map[parts[1]]
+        mask = (diff >= threshold).astype(np.uint8) * 255
+    else:
+        mask = np.zeros(img.shape[:2], dtype=np.uint8)
+
+    return mask
+
+
+def detect_color_ratio(img, pair='bg', threshold=1.5):
+    """
+    채널 비율 검출: B/G, R/G, B/R 등 두 채널의 직접 비율로 판단
+
+    AOI에서 경사 방향 판별에 사용. Normalized RGB와 달리
+    두 채널만의 상대적 관계에 집중.
+
+    Args:
+        img: BGR 이미지
+        pair: 'bg'=B/G, 'br'=B/R, 'rg'=R/G 등
+        threshold: 비율 임계값 (1.0 이상)
+
+    Returns:
+        numpy.ndarray: 이진 마스크
+    """
+    b, g, r = cv.split(img)
+    b = b.astype(np.float32)
+    g = g.astype(np.float32)
+    r = r.astype(np.float32)
+
+    pair_map = {
+        'bg': (b, g), 'br': (b, r), 'rg': (r, g),
+        'gb': (g, b), 'rb': (r, b), 'gr': (g, r)
+    }
+
+    if pair in pair_map:
+        num, den = pair_map[pair]
+        den = np.maximum(den, 1.0)
+        ratio = num / den
+        mask = (ratio >= threshold).astype(np.uint8) * 255
+    else:
+        mask = np.zeros(img.shape[:2], dtype=np.uint8)
+
+    return mask
+
+
+def detect_gradient_pattern(img, direction='horizontal'):
+    """
+    색상 그라데이션 방향 분석
+
+    솔더 필렛은 Blue→Green→Red 순차적 색상 전환이 나타남.
+    이 전환 패턴의 gradient 방향으로 필렛 영역 식별.
+
+    Args:
+        img: BGR 이미지
+        direction: 'horizontal' or 'vertical'
+
+    Returns:
+        numpy.ndarray: 이진 마스크
+    """
+    norm_b, norm_g, norm_r = normalize_rgb(img)
+
+    # Blue의 gradient (Blue가 감소하는 방향 = 필렛 곡면)
+    if direction == 'horizontal':
+        grad_b = cv.Sobel(norm_b, cv.CV_32F, 1, 0, ksize=3)
+        grad_r = cv.Sobel(norm_r, cv.CV_32F, 1, 0, ksize=3)
+    else:
+        grad_b = cv.Sobel(norm_b, cv.CV_32F, 0, 1, ksize=3)
+        grad_r = cv.Sobel(norm_r, cv.CV_32F, 0, 1, ksize=3)
+
+    # Blue 감소 + Red 증가 = 필렛 전환 영역 (또는 반대)
+    transition = np.abs(grad_b) + np.abs(grad_r)
+
+    # 전환이 강한 영역 주변이 필렛
+    transition_norm = cv.normalize(transition, None, 0, 255, cv.NORM_MINMAX)
+    _, mask = cv.threshold(transition_norm.astype(np.uint8), 30, 255, cv.THRESH_BINARY)
+
+    # 전환 영역을 팽창하여 필렛 면적으로 확장
+    kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (5, 5))
+    mask = cv.dilate(mask, kernel, iterations=2)
+
+    return mask
+
+
+def detect_denoised(img, denoise_method='bilateral', detect_func=None, **kwargs):
+    """
+    노이즈 제거 후 검출 (wrapper)
+
+    AOI 이미지의 표면 거칠기 노이즈를 먼저 제거한 후
+    기존 검출 방법을 적용.
+
+    Args:
+        img: BGR 이미지
+        denoise_method: 'bilateral' or 'nlm'
+        detect_func: 검출 함수 (mask = func(denoised_img, **kwargs))
+        **kwargs: 검출 함수에 전달할 인자
+
+    Returns:
+        numpy.ndarray: 이진 마스크
+    """
+    if denoise_method == 'bilateral':
+        denoised = apply_bilateral_filter(img)
+    elif denoise_method == 'nlm':
+        denoised = apply_nlm_denoise(img)
+    else:
+        denoised = img
+
+    if detect_func is not None:
+        return detect_func(denoised, **kwargs)
+    else:
+        return detect_otsu_blue_inv(denoised)
+
+
+def detect_ensemble_v4(img):
+    """
+    v4 앙상블: Normalized RGB + 노이즈 제거 + 기존 안정 방법 결합
+
+    v3 대비 변경:
+    - Normalized RGB 검출 추가 (산업용 AOI 표준)
+    - Bilateral Filter 전처리 적용 방법 추가
+    - 색상 비율 기반 검출 추가
+
+    가중치는 v4 분석 결과로 업데이트 예정.
+    현재는 초기 설정.
+    """
+    h, w = img.shape[:2]
+    votes = np.zeros((h, w), dtype=np.float32)
+
+    # 노이즈 제거된 이미지 준비
+    denoised = apply_bilateral_filter(img, d=9, sigma_color=75, sigma_space=75)
+
+    # 방법 1: Bilateral + CLAHE Blue inv (노이즈 제거 + 안정성 1위)
+    mask1 = detect_clahe_blue_inv(denoised, clip_limit=4.0, tile_size=4)
+    votes += (mask1 > 0).astype(np.float32) * 2.0
+
+    # 방법 2: Normalized RGB blue (산업용 AOI 표준)
+    mask2 = detect_normalized_rgb(denoised, target='blue', threshold=0.40)
+    votes += (mask2 > 0).astype(np.float32) * 1.8
+
+    # 방법 3: 채널 비율 B/G (Blue가 Green보다 우세한 영역)
+    mask3 = detect_color_ratio(denoised, pair='bg', threshold=1.3)
+    votes += (mask3 > 0).astype(np.float32) * 1.5
+
+    # 방법 4: Bilateral + Saturation (기존 IoU 1위에 노이즈 제거)
+    hsv = cv.cvtColor(denoised, cv.COLOR_BGR2HSV)
+    s_ch = hsv[:, :, 1]
+    mask4 = cv.inRange(s_ch, 30, 255)
+    votes += (mask4 > 0).astype(np.float32) * 1.0
+
+    # 방법 5: Norm RGB 차이 b-r (Blue 비율이 Red보다 높은 영역)
+    mask5 = detect_norm_rgb_diff(denoised, pair='b-r', threshold=0.05)
+    votes += (mask5 > 0).astype(np.float32) * 1.0
+
+    # 투표 임계값: 가중합 >= 3.0 (5가지 방법 중 충분한 동의)
+    mask = (votes >= 3.0).astype(np.uint8) * 255
 
     return mask
 

@@ -166,6 +166,68 @@ def create_mask_from_hsv(hsv_img, lower_bound, upper_bound):
     return mask
 
 
+def apply_bilateral_filter(img, d=9, sigma_color=75, sigma_space=75):
+    """
+    Bilateral Filter: 엣지 보존하면서 노이즈 제거
+
+    AOI RGB 조명 이미지에서 표면 거칠기에 의한 색상 노이즈를 제거하되,
+    솔더 필렛의 색상 경계(Blue→Green→Red 전환)는 보존.
+
+    Args:
+        img (numpy.ndarray): BGR 이미지
+        d (int): 필터 직경 (-1이면 sigma_space에서 자동 계산)
+        sigma_color (float): 색상 공간 시그마 (클수록 먼 색상도 혼합)
+        sigma_space (float): 좌표 공간 시그마 (클수록 넓은 범위 혼합)
+
+    Returns:
+        numpy.ndarray: 노이즈 제거된 이미지
+    """
+    return cv.bilateralFilter(img, d, sigma_color, sigma_space)
+
+
+def apply_nlm_denoise(img, h=10, template_size=7, search_size=21):
+    """
+    Non-local Means Denoising: 패턴 유사성 기반 강력한 노이즈 제거
+
+    동일한 패턴의 픽셀들을 찾아 평균화하므로 반복적 노이즈에 효과적.
+    AOI 이미지의 표면 거칠기에 의한 자글자글한 노이즈 제거에 적합.
+
+    Args:
+        img (numpy.ndarray): BGR 이미지
+        h (float): 필터 강도 (클수록 노이즈 많이 제거, 디테일 손실)
+        template_size (int): 템플릿 패치 크기 (홀수)
+        search_size (int): 검색 윈도우 크기 (홀수)
+
+    Returns:
+        numpy.ndarray: 노이즈 제거된 이미지
+    """
+    return cv.fastNlMeansDenoisingColored(img, None, h, h, template_size, search_size)
+
+
+def normalize_rgb(img):
+    """
+    Normalized RGB 변환: r = R/(R+G+B), g = G/(R+G+B), b = B/(R+G+B)
+
+    산업용 AOI 표준 방식. 조명 밝기(전체 밝기)에 무관하게
+    순수한 색상 비율만 추출. 밝든 어둡든 같은 경사면은 같은 비율.
+
+    Args:
+        img (numpy.ndarray): BGR 이미지
+
+    Returns:
+        tuple: (norm_b, norm_g, norm_r) 각각 float32 [0.0~1.0]
+    """
+    b, g, r = cv.split(img)
+    total = b.astype(np.float32) + g.astype(np.float32) + r.astype(np.float32)
+    total = np.maximum(total, 1.0)  # 0으로 나누기 방지
+
+    norm_b = b.astype(np.float32) / total
+    norm_g = g.astype(np.float32) / total
+    norm_r = r.astype(np.float32) / total
+
+    return norm_b, norm_g, norm_r
+
+
 def enhance_contrast(img):
     """
     이미지 대비 향상 (CLAHE: Contrast Limited Adaptive Histogram Equalization)
