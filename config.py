@@ -48,6 +48,10 @@ class Config:
         # Normalized RGB 임계값 (norm_rgb 방법 사용 시)
         self.NORM_RGB_THRESHOLD = 0.40
 
+        # GT 마스크 디렉토리 (LabelMe 변환 바이너리 마스크)
+        # 이 경로에 마스크가 있으면 마젠타 라벨 대신 사용
+        self.GT_MASK_DIR = 'annotations/gt_masks'
+
         # HSV 색상 범위 (2D 색상 모드용, HEIGHT_MAP_MODE=False일 때 사용)
         # 주의: 실제 이미지에 맞춰 조정 필요
         self.LOWER_HSV = np.array([0, 0, 180])

@@ -14,6 +14,7 @@ import time
 
 TEST_DIR = "test"
 LABEL_DIR = "test_label"
+GT_MASK_DIR = "annotations/gt_masks"  # LabelMe 변환 바이너리 마스크 (우선)
 OUTPUT_DIR = "analysis_results_v4"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -788,20 +789,39 @@ def main():
     gt_masks = {}
     for fname in fnames:
         test_path = os.path.join(TEST_DIR, fname)
-        label_path = os.path.join(LABEL_DIR, fname)
+        base = os.path.splitext(fname)[0]
 
         img = cv.imread(test_path)
-        label = cv.imread(label_path)
+        if img is None:
+            continue
 
-        if img is None or label is None:
+        print(f"\n  처리: {fname} (크기: {img.shape})")
+
+        # 1순위: LabelMe 변환 바이너리 마스크 (annotations/gt_masks/)
+        mask_path = os.path.join(GT_MASK_DIR, fname)
+        if os.path.exists(mask_path):
+            gt_mask = cv.imread(mask_path, cv.IMREAD_GRAYSCALE)
+            if gt_mask is not None:
+                # 이미지 크기 맞추기
+                if gt_mask.shape[:2] != img.shape[:2]:
+                    gt_mask = cv.resize(gt_mask, (img.shape[1], img.shape[0]))
+                gt_mask = (gt_mask > 127).astype(np.uint8) * 255
+                area_pct = np.count_nonzero(gt_mask) / gt_mask.size * 100
+                print(f"    -> LabelMe 마스크 로드 (영역: {area_pct:.1f}%)")
+                gt_masks[fname] = gt_mask
+                continue
+
+        # 2순위: 기존 마젠타 라벨에서 추출 (폴백)
+        label_path = os.path.join(LABEL_DIR, fname)
+        label = cv.imread(label_path)
+        if label is None:
+            print(f"    [!] 라벨 없음: {fname}")
             continue
 
         if img.shape != label.shape:
             label = cv.resize(label, (img.shape[1], img.shape[0]))
 
-        base = os.path.splitext(fname)[0]
-        print(f"\n  처리: {fname} (크기: {img.shape})")
-
+        print(f"    -> 마젠타 라벨 추출 (폴백)")
         gt_mask = extract_gt_improved(label, img, debug_dir=gt_debug_dir, name=base)
         gt_masks[fname] = gt_mask
 

@@ -34,6 +34,9 @@ calibration/
 analysis_results/
 analysis_results_v*/
 
+# GT 마스크 (LabelMe JSON에서 재생성 가능)
+annotations/gt_masks/
+
 # 원본 이미지 백업
 images_main/
 
