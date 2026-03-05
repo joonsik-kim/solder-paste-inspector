@@ -34,11 +34,29 @@ calibration/
 analysis_results/
 analysis_results_v*/
 
-# GT 마스크 (LabelMe JSON에서 재생성 가능)
-annotations/gt_masks/
+# GT 마스크 및 어노테이션
+annotations/
 
-# 원본 이미지 백업
+# 원본 이미지 (용량 큼)
 images_main/
+images_TNMX/
+images_gull/
+
+# 모델 바이너리 (Git LFS 없이는 push 불가)
+*.pth
+*.onnx
+
+# 학습 결과 (재생성 가능)
+dl/results/
+dl/clahe_preview/
+dl/analysis/
+
+# 임시/불필요 파일
+*.zip
+*.lnk
+
+# 배포 출력
+spi_output/
 
 # Claude Code 세션 데이터
 .claude/
