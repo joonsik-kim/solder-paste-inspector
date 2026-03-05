@@ -12,7 +12,7 @@ import os
 import json
 import time
 
-TEST_DIR = "test"
+TEST_DIR = "images_main"
 LABEL_DIR = "test_label"
 GT_MASK_DIR = "annotations/gt_masks"  # LabelMe 변환 바이너리 마스크 (우선)
 OUTPUT_DIR = "analysis_results_v4"
@@ -776,7 +776,8 @@ def main():
     all_results = {}
     gt_debug_dir = os.path.join(OUTPUT_DIR, "gt_debug")
 
-    fnames = sorted(os.listdir(TEST_DIR))
+    fnames = sorted([f for f in os.listdir(TEST_DIR)
+                     if f.lower().endswith(('.png', '.jpg', '.bmp'))])
     print(f"\n테스트 이미지: {len(fnames)}개")
 
     # ============================================================
