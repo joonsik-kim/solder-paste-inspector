@@ -1,0 +1,14 @@
+{
+  "current_version": 1,
+  "models": [
+    {
+      "version": 1,
+      "filename": "best_model.pth",
+      "epoch": 121,
+      "val_iou": 0.9245,
+      "date": "2026-03-05",
+      "labels": 593,
+      "note": "main:181 + gull:52 + tnmx:360"
+    }
+  ]
+}
