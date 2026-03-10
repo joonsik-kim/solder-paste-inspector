@@ -1,5 +1,5 @@
 {
-  "current_version": 1,
+  "current_version": 2,
   "models": [
     {
       "version": 1,
@@ -9,6 +9,14 @@
       "date": "2026-03-05",
       "labels": 593,
       "note": "main:181 + gull:52 + tnmx:360"
+    },
+    {
+      "version": 2,
+      "filename": "best_model.pth",
+      "epoch": 68,
+      "val_iou": 0.9055,
+      "date": "2026-03-06",
+      "note": "run_008: 788장(manual+modified auto), 기존 증강, Val IoU 0.9055, Val Dice 0.9502"
     }
   ]
 }

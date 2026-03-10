@@ -32,10 +32,8 @@ from datetime import datetime
 import numpy as np
 import cv2 as cv
 
-import torch
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-import segmentation_models_pytorch as smp
+# ML libraries (torch, albumentations, smp) are imported lazily inside functions
+# to allow ONNX-only mode without PyTorch installed.
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -93,6 +91,34 @@ def compute_slope(height_map):
     magnitude = np.sqrt(gx**2 + gy**2)
     direction = np.arctan2(gy, gx)
     return magnitude, direction
+
+
+def _compute_color_zone(img_rgb, mask_bool):
+    """Compute RGB dominant zone percentages within mask.
+
+    VT-S730 height encoding:
+      R dominant -> low surface (edge/PCB)
+      G dominant -> mid height (slope)
+      B dominant -> high surface (solder center)
+    """
+    r = img_rgb[:, :, 0].astype(np.float32)
+    g = img_rgb[:, :, 1].astype(np.float32)
+    b = img_rgb[:, :, 2].astype(np.float32)
+
+    r_m, g_m, b_m = r[mask_bool], g[mask_bool], b[mask_bool]
+    total = len(r_m)
+    if total == 0:
+        return {"red_pct": 0.0, "green_pct": 0.0, "blue_pct": 0.0}
+
+    red_dom = float(np.sum((r_m > g_m) & (r_m > b_m)) / total * 100)
+    green_dom = float(np.sum((g_m > r_m) & (g_m > b_m)) / total * 100)
+    blue_dom = float(np.sum((b_m > r_m) & (b_m > g_m)) / total * 100)
+
+    return {
+        "red_pct": round(red_dom, 2),
+        "green_pct": round(green_dom, 2),
+        "blue_pct": round(blue_dom, 2),
+    }
 
 
 def analyze_region(img_rgb, mask, pixel_size_um=DEFAULT_PIXEL_SIZE_UM):
@@ -187,6 +213,7 @@ def analyze_region(img_rgb, mask, pixel_size_um=DEFAULT_PIXEL_SIZE_UM):
             "vertical": [round(v, 4) for v in v_profile],
         },
         "centroid": {"x": cx, "y": cy},
+        "color_zone": _compute_color_zone(img_rgb, mask_bool),
     }
 
 
@@ -297,6 +324,7 @@ def create_visualization(img_orig_bgr, mask, analysis, stem):
 # ============================================================
 def get_device(device_str=None):
     """Resolve device string to torch.device."""
+    import torch
     if device_str and device_str != "auto":
         return torch.device(device_str)
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -304,6 +332,8 @@ def get_device(device_str=None):
 
 def load_model(model_path=None, device=None):
     """Load trained U-Net model from checkpoint."""
+    import torch
+    import segmentation_models_pytorch as smp
     if model_path is None:
         model_path = MODEL_PATH
     model_path = Path(model_path)
@@ -335,6 +365,8 @@ def load_model(model_path=None, device=None):
 
 def get_transform():
     """Get inference transform (must match training)."""
+    import albumentations as A
+    from albumentations.pytorch import ToTensorV2
     return A.Compose(
         [
             A.Resize(IMG_SIZE, IMG_SIZE),
@@ -347,12 +379,12 @@ def get_transform():
 # ============================================================
 # Inference
 # ============================================================
-@torch.no_grad()
 def predict_mask(model, img_bgr, transform, device, threshold=0.5):
     """Predict binary mask from image with CLAHE preprocessing.
 
     Pipeline: BGR -> RGB -> CLAHE -> Normalize -> U-Net -> Sigmoid -> Threshold
     """
+    import torch
     h, w = img_bgr.shape[:2]
     img_rgb = cv.cvtColor(img_bgr, cv.COLOR_BGR2RGB)
     img_clahe = apply_clahe(img_rgb)
@@ -360,7 +392,8 @@ def predict_mask(model, img_bgr, transform, device, threshold=0.5):
     augmented = transform(image=img_clahe, mask=np.zeros((h, w), dtype=np.float32))
     img_tensor = augmented["image"].unsqueeze(0).to(device)
 
-    pred = torch.sigmoid(model(img_tensor)).squeeze().cpu().numpy()
+    with torch.no_grad():
+        pred = torch.sigmoid(model(img_tensor)).squeeze().cpu().numpy()
     pred_mask = (pred > threshold).astype(np.uint8) * 255
     return cv.resize(pred_mask, (w, h), interpolation=cv.INTER_NEAREST)
 
@@ -405,6 +438,142 @@ def save_registry(registry):
 
 
 # ============================================================
+# Summary Charts (self-contained, matplotlib lazy import)
+# ============================================================
+def _generate_charts(valid_results, img_paths, run_dir):
+    """Generate batch summary charts. Requires matplotlib (optional)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("  [WARN] matplotlib not installed, skipping charts.")
+        return
+
+    areas = [r["area_mm2"] for r in valid_results]
+    heights = [r["height_proxy"]["mean"] for r in valid_results]
+    ce_ratios = [r["height_proxy"]["center_edge_ratio"] for r in valid_results]
+    slopes = [r["slope"]["mean"] for r in valid_results]
+    uniformities = [r["slope"]["uniformity"] for r in valid_results]
+
+    # --- Scatter: Area vs Height ---
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(areas, heights, alpha=0.6, edgecolors="k", linewidth=0.5)
+    ax.set_xlabel("Area (mm2)")
+    ax.set_ylabel("Height Proxy Mean")
+    ax.set_title("Area vs Height Proxy")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(str(run_dir / "scatter_area_vs_height.png"), dpi=150)
+    plt.close(fig)
+
+    # --- Scatter: CE ratio vs Uniformity ---
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(ce_ratios, uniformities, alpha=0.6, edgecolors="k", linewidth=0.5)
+    ax.set_xlabel("Center-Edge Ratio")
+    ax.set_ylabel("Slope Uniformity")
+    ax.set_title("CE Ratio vs Slope Uniformity")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(str(run_dir / "scatter_ce_vs_uniformity.png"), dpi=150)
+    plt.close(fig)
+
+    # --- Histograms 2x2 ---
+    metrics = [
+        (areas, "Area (mm2)", "steelblue"),
+        (heights, "Height Proxy Mean", "darkorange"),
+        (ce_ratios, "CE Ratio", "seagreen"),
+        (slopes, "Slope Mean", "indianred"),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    for ax, (data, label, color) in zip(axes.flat, metrics):
+        bins = min(30, max(5, len(data) // 3))
+        ax.hist(data, bins=bins, color=color, edgecolor="white", alpha=0.8)
+        ax.set_xlabel(label)
+        ax.set_ylabel("Count")
+        ax.set_title(f"Distribution of {label}")
+        ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(str(run_dir / "histograms.png"), dpi=150)
+    plt.close(fig)
+
+    # --- RGB Distribution (self-contained) ---
+    rgb_results = []
+    for r in valid_results:
+        if "color_zone" in r:
+            rgb_results.append(r)
+        else:
+            # Compute RGB zone from original image if not in results
+            pass  # color_zone added by analyze_region()
+
+    if rgb_results:
+        n = len(rgb_results)
+        x = np.arange(n)
+        blues = [r["color_zone"]["blue_pct"] for r in rgb_results]
+        greens = [r["color_zone"]["green_pct"] for r in rgb_results]
+        reds = [r["color_zone"]["red_pct"] for r in rgb_results]
+
+        fig_w = max(8, n * 0.3)
+        fig, ax = plt.subplots(figsize=(min(fig_w, 40), 6))
+        ax.bar(x, blues, label="Blue (High)", color="royalblue", alpha=0.85)
+        ax.bar(x, greens, bottom=blues, label="Green (Mid)", color="limegreen", alpha=0.85)
+        bottoms = [b + g for b, g in zip(blues, greens)]
+        ax.bar(x, reds, bottom=bottoms, label="Red (Low)", color="tomato", alpha=0.85)
+        if n <= 30:
+            stems = [r.get("filename", str(i))[:12] for i, r in enumerate(rgb_results)]
+            ax.set_xticks(x)
+            ax.set_xticklabels(stems, rotation=90, fontsize=6)
+        else:
+            ax.set_xticks([])
+            ax.set_xlabel(f"Images ({n} total)")
+        ax.set_ylabel("Percentage (%)")
+        ax.set_title("RGB Color Zone Distribution per Fillet")
+        ax.legend(loc="upper right")
+        ax.set_ylim(0, 105)
+        ax.grid(True, alpha=0.3, axis="y")
+        fig.tight_layout()
+        fig.savefig(str(run_dir / "rgb_distribution.png"), dpi=150)
+        plt.close(fig)
+
+    # --- Thumbnail Grid ---
+    overlay_items = []
+    for img_path in img_paths:
+        img_bgr = cv.imread(str(img_path))
+        if img_bgr is None:
+            continue
+        mask_path = run_dir / "mask" / f"{img_path.stem}_mask.png"
+        if not mask_path.exists():
+            continue
+        mask = cv.imread(str(mask_path), cv.IMREAD_GRAYSCALE)
+        mask_bool = mask > 127
+        ov = img_bgr.copy()
+        ov_color = np.zeros_like(img_bgr)
+        ov_color[mask_bool] = [0, 0, 255]
+        ov = cv.addWeighted(ov, 0.7, ov_color, 0.3, 0)
+        overlay_items.append((img_path.stem, ov))
+        if len(overlay_items) >= 100:
+            break
+
+    if overlay_items:
+        n = len(overlay_items)
+        cols = min(10, n)
+        rows = (n + cols - 1) // cols
+        thumb_size = 128
+        grid = np.zeros((rows * thumb_size, cols * thumb_size, 3), dtype=np.uint8)
+        for idx, (stem, img) in enumerate(overlay_items):
+            r, c = divmod(idx, cols)
+            thumb = cv.resize(img, (thumb_size, thumb_size))
+            y1 = r * thumb_size
+            x1 = c * thumb_size
+            grid[y1:y1 + thumb_size, x1:x1 + thumb_size] = thumb
+            cv.putText(grid, stem[:15], (x1 + 2, y1 + thumb_size - 5),
+                       cv.FONT_HERSHEY_SIMPLEX, 0.25, (255, 255, 255), 1)
+        cv.imwrite(str(run_dir / "thumbnail_grid.png"), grid)
+
+    print(f"  Charts:  {run_dir} (scatter, histogram, RGB, thumbnails)")
+
+
+# ============================================================
 # Subcommand: predict
 # ============================================================
 def cmd_predict(args):
@@ -414,13 +583,20 @@ def cmd_predict(args):
         print(f"[ERROR] Input not found: {input_path}")
         sys.exit(1)
 
-    output_dir = Path(args.output)
-    os.makedirs(output_dir, exist_ok=True)
+    output_base = Path(args.output)
+    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_base / run_stamp
+    mask_dir = run_dir / "mask"
+    overlay_dir = run_dir / "overlay"
+    analysis_dir = run_dir / "analysis"
+    json_dir = run_dir / "json"
+    for d in [mask_dir, overlay_dir, analysis_dir, json_dir]:
+        os.makedirs(d, exist_ok=True)
 
-    device = get_device(args.device)
     threshold = args.threshold
     pixel_size = args.pixel_size
     no_viz = args.no_viz
+    use_onnx = args.runtime == "onnx"
 
     # Collect image paths
     if input_path.is_file():
@@ -439,9 +615,15 @@ def cmd_predict(args):
         print("[ERROR] No images found.")
         sys.exit(1)
 
+    # Resolve device (torch only imported for PyTorch mode)
+    if use_onnx:
+        device = "ONNX Runtime"
+    else:
+        device = get_device(args.device)
+
     print(f"[SPI] Solder Paste Inspector v{VERSION}")
     print(f"  Input:      {input_path}")
-    print(f"  Output:     {output_dir}")
+    print(f"  Output:     {run_dir}")
     print(f"  Images:     {len(img_paths)}")
     print(f"  Device:     {device}")
     print(f"  Threshold:  {threshold}")
@@ -449,7 +631,6 @@ def cmd_predict(args):
     print()
 
     # Load model (PyTorch or ONNX)
-    use_onnx = args.runtime == "onnx"
     onnx_session = None
 
     if use_onnx:
@@ -503,7 +684,7 @@ def cmd_predict(args):
 
         # Save mask
         stem = img_path.stem
-        cv.imwrite(str(output_dir / f"{stem}_mask.png"), mask)
+        cv.imwrite(str(mask_dir / f"{stem}_mask.png"), mask)
 
         # Save overlay
         overlay = img_bgr.copy()
@@ -511,17 +692,17 @@ def cmd_predict(args):
         mask_bool = mask > 127
         overlay_color[mask_bool] = [0, 0, 255]  # Red in BGR
         overlay = cv.addWeighted(overlay, 0.7, overlay_color, 0.3, 0)
-        cv.imwrite(str(output_dir / f"{stem}_overlay.png"), overlay)
+        cv.imwrite(str(overlay_dir / f"{stem}_overlay.png"), overlay)
 
         # Save analysis visualization
         if not no_viz and analysis.get("valid", False):
             vis = create_visualization(img_bgr, mask, analysis, stem)
-            cv.imwrite(str(output_dir / f"{stem}_analysis.png"), vis)
+            cv.imwrite(str(analysis_dir / f"{stem}_analysis.png"), vis)
 
         # Save per-image JSON result
         result_data = {k: v for k, v in analysis.items() if k != "profile"}
         result_data["pixel_size_um"] = pixel_size
-        with open(output_dir / f"{stem}_result.json", "w", encoding="utf-8") as f:
+        with open(json_dir / f"{stem}_result.json", "w", encoding="utf-8") as f:
             json.dump(result_data, f, indent=2, ensure_ascii=False)
 
         results.append(analysis)
@@ -596,11 +777,11 @@ def cmd_predict(args):
             ],
         }
 
-        with open(output_dir / "batch_summary.json", "w", encoding="utf-8") as f:
+        with open(run_dir / "batch_summary.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
 
         # Save batch summary CSV
-        with open(output_dir / "batch_summary.csv", "w", newline="", encoding="utf-8") as f:
+        with open(run_dir / "batch_summary.csv", "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(
                 [
@@ -615,12 +796,16 @@ def cmd_predict(args):
                     "slope_mean",
                     "slope_max",
                     "slope_uniformity",
+                    "red_pct",
+                    "green_pct",
+                    "blue_pct",
                     "centroid_x",
                     "centroid_y",
                     "inference_ms",
                 ]
             )
             for r in valid_results:
+                cz = r.get("color_zone", {})
                 writer.writerow(
                     [
                         r["filename"],
@@ -634,16 +819,23 @@ def cmd_predict(args):
                         r["slope"]["mean"],
                         r["slope"]["max"],
                         r["slope"]["uniformity"],
+                        cz.get("red_pct", 0),
+                        cz.get("green_pct", 0),
+                        cz.get("blue_pct", 0),
                         r["centroid"]["x"],
                         r["centroid"]["y"],
                         r.get("inference_time_ms", 0),
                     ]
                 )
 
-        print(f"\n  Summary: {output_dir / 'batch_summary.json'}")
-        print(f"  CSV:     {output_dir / 'batch_summary.csv'}")
+        print(f"\n  Summary: {run_dir / 'batch_summary.json'}")
+        print(f"  CSV:     {run_dir / 'batch_summary.csv'}")
 
-    print(f"  Output:  {output_dir}")
+        # Generate summary charts
+        if not args.no_charts and len(valid_results) >= 2:
+            _generate_charts(valid_results, img_paths, run_dir)
+
+    print(f"  Output:  {run_dir}")
 
 
 # ============================================================
@@ -651,6 +843,7 @@ def cmd_predict(args):
 # ============================================================
 def cmd_export(args):
     """Export model to ONNX format."""
+    import torch
     if args.format != "onnx":
         print(f"[ERROR] Unsupported format: {args.format}. Only 'onnx' is supported.")
         sys.exit(1)
@@ -694,6 +887,8 @@ def cmd_export(args):
 # ============================================================
 def cmd_update_model(args):
     """Update model with a newly trained checkpoint."""
+    import torch
+    import segmentation_models_pytorch as smp
     new_model_path = Path(args.model_path)
     if not new_model_path.exists():
         print(f"[ERROR] Model file not found: {new_model_path}")
@@ -770,6 +965,7 @@ def cmd_update_model(args):
 # ============================================================
 def cmd_info(args):
     """Display current model and system information."""
+    import torch
     print(f"SPI v{VERSION} - Solder Paste Inspector")
     print(f"{'='*50}")
 
@@ -853,6 +1049,7 @@ Examples:
     p_predict.add_argument("--runtime", choices=["pytorch", "onnx"], default="pytorch", help="Inference runtime (default: pytorch)")
     p_predict.add_argument("--model", default=None, help="Custom model path (default: models/best_model.pth)")
     p_predict.add_argument("--limit", type=int, default=0, help="Max images to process (0=all)")
+    p_predict.add_argument("--no-charts", action="store_true", help="Skip summary chart generation")
 
     # export
     p_export = subparsers.add_parser("export", help="Export model to ONNX")

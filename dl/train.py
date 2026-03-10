@@ -50,6 +50,7 @@ NUM_EPOCHS = 200
 LR = 1e-3
 VAL_RATIO = 0.2
 SEED = 42
+PATIENCE = 30  # Early stopping: 30 에폭 동안 val IoU 개선 없으면 학습 중단
 
 # VT-S730 AOI 해상도: ~15 µm/pixel (4MP, FOV 30mm)
 PIXEL_SIZE_UM = 15.0
@@ -125,13 +126,10 @@ def get_transforms(is_train=True):
     if is_train:
         return A.Compose([
             A.Resize(IMG_SIZE, IMG_SIZE),
-            # 기하학적 변환
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
-            # 색상/밝기 변환 (조명 변화 대응)
             A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-            # 노이즈 (센서 노이즈 대응)
             A.GaussNoise(std_range=(0.01, 0.05), p=0.3),
             # 정규화
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -702,6 +700,8 @@ def main():
     print(f"\n{'Epoch':>6} | {'Train Loss':>10} | {'Val Loss':>10} | {'Train IoU':>10} | {'Val IoU':>10} | {'Val Dice':>10} | {'LR':>10}")
     print("-" * 85)
 
+    patience_counter = 0
+
     for epoch in range(1, NUM_EPOCHS + 1):
         train_loss, train_iou, train_dice = train_one_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_iou, val_dice = validate(model, val_loader, criterion)
@@ -720,6 +720,7 @@ def main():
         if val_iou > best_val_iou:
             best_val_iou = val_iou
             best_epoch = epoch
+            patience_counter = 0
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -728,11 +729,18 @@ def main():
                 "val_dice": val_dice,
             }, OUTPUT_DIR / "best_model.pth")
             marker = " *"
+        else:
+            patience_counter += 1
 
         if epoch % 10 == 0 or epoch <= 5 or marker:
             print(f"{epoch:>6} | {train_loss:>10.4f} | {val_loss:>10.4f} | "
                   f"{train_iou:>10.4f} | {val_iou:>10.4f} | {val_dice:>10.4f} | "
                   f"{lr:>10.6f}{marker}")
+
+        if patience_counter >= PATIENCE:
+            print(f"\n[Early Stopping] epoch {epoch} — "
+                  f"{PATIENCE} 에폭 동안 Val IoU 개선 없음 (best: {best_val_iou:.4f})")
+            break
 
     # 결과 요약
     print("\n" + "=" * 60)

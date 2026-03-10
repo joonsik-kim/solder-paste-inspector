@@ -25,6 +25,9 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+from spi_core import apply_clahe
+
 MODEL_PATH = PROJECT_ROOT / "dl" / "models" / "best_model.pth"
 IMG_SIZE = 128
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -65,8 +68,9 @@ def predict_single(model, img_path, transform, output_dir=None):
 
     h, w = img.shape[:2]
     img_rgb = cv.cvtColor(img, cv.COLOR_BGR2RGB)
+    img_clahe = apply_clahe(img_rgb)
 
-    augmented = transform(image=img_rgb, mask=np.zeros((h, w), dtype=np.float32))
+    augmented = transform(image=img_clahe, mask=np.zeros((h, w), dtype=np.float32))
     img_tensor = augmented["image"].unsqueeze(0).to(DEVICE)
 
     pred = torch.sigmoid(model(img_tensor)).squeeze().cpu().numpy()
