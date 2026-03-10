@@ -1,0 +1,8 @@
+torch
+torchvision
+opencv-python
+numpy
+albumentations
+segmentation-models-pytorch
+onnx
+onnxruntime
