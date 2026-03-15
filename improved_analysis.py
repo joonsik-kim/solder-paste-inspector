@@ -1,8 +1,8 @@
 """
-개선된 솔더 페이스트 검출 분석
+개선된 솔더 페이스트 검출 분석 v4
 ===============================
-1단계: 개선된 GT 마스크 추출 (보라색 윤곽선 정밀 검출)
-2단계: 200+ 검출 방법 IoU 평가
+1단계: 개선된 GT 마스크 추출 (마젠타 색상 정밀 검출)
+2단계: 330+ 검출 방법 IoU 평가
 3단계: 결과 분석 및 최적 방법 도출
 """
 
@@ -14,7 +14,8 @@ import time
 
 TEST_DIR = "test"
 LABEL_DIR = "test_label"
-OUTPUT_DIR = "analysis_results_v2"
+GT_MASK_DIR = "annotations/gt_masks"  # LabelMe 변환 바이너리 마스크 (우선)
+OUTPUT_DIR = "analysis_results_v4"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
@@ -62,77 +63,83 @@ def clean_mask(mask, min_area=5, morph_k=3):
 # ============================================================
 def extract_gt_improved(label_img, orig_img, debug_dir=None, name=""):
     """
-    개선된 GT 마스크 추출:
-    1. 라벨-원본 diff에서 보라색 윤곽선만 정밀 추출
-    2. 압축 아티팩트 필터링 (보라색 색상 조건 강화)
-    3. 윤곽선 내부 채우기
+    개선된 GT 마스크 추출 v4 (마젠타 색상 감지):
+    1. 라벨 이미지에서 마젠타(255,0,255) 색상 정밀 추출
+    2. 원본과의 diff + 마젠타 색상 조건으로 이중 검증
+    3. 윤곽선 내부 채우기 + 두꺼운 선 보정(erode)
     """
     h, w = label_img.shape[:2]
+    img_area = h * w
 
     # === 1단계: 차이 계산 ===
     diff = cv.absdiff(label_img, orig_img)
     diff_gray = cv.cvtColor(diff, cv.COLOR_BGR2GRAY)
 
-    # === 2단계: 보라색 윤곽선 정밀 검출 ===
-    # 라벨 이미지의 HSV 변환
+    # === 2단계: 마젠타 색상 정밀 검출 ===
     label_hsv = cv.cvtColor(label_img, cv.COLOR_BGR2HSV)
-    orig_hsv = cv.cvtColor(orig_img, cv.COLOR_BGR2HSV)
 
-    # 라벨 BGR 채널
-    lb, lg, lr = label_img[:,:,0].astype(np.float32), label_img[:,:,1].astype(np.float32), label_img[:,:,2].astype(np.float32)
-    ob, og, oR = orig_img[:,:,0].astype(np.float32), orig_img[:,:,1].astype(np.float32), orig_img[:,:,2].astype(np.float32)
+    # 라벨 BGR 채널 (float)
+    lb = label_img[:,:,0].astype(np.float32)  # Blue
+    lg = label_img[:,:,1].astype(np.float32)  # Green
+    lr = label_img[:,:,2].astype(np.float32)  # Red
 
-    # 방법 A: HSV 보라색 범위 (라벨 이미지에서)
-    # 보라색: H=120~170, S>30, V>30
-    purple_hsv1 = cv.inRange(label_hsv, np.array([120, 30, 30]), np.array([170, 255, 255]))
+    # 방법 A: HSV에서 마젠타 범위
+    # 마젠타(255,0,255) → HSV에서 H≈150 (OpenCV 0-180 스케일)
+    # 넓은 범위: H=140~180 (wrap-around 고려), S>50, V>50
+    magenta_hsv1 = cv.inRange(label_hsv, np.array([140, 50, 50]), np.array([180, 255, 255]))
+    # H=0~10 영역도 체크 (wrap-around: 핑크/마젠타 경계)
+    magenta_hsv2 = cv.inRange(label_hsv, np.array([0, 50, 50]), np.array([10, 255, 255]))
+    magenta_hsv = cv.bitwise_or(magenta_hsv1, magenta_hsv2)
 
-    # 방법 B: BGR에서 보라색 조건 (B>80, R>80, G < min(B,R) - 20)
-    purple_bgr = np.zeros((h, w), dtype=np.uint8)
+    # 방법 B: BGR에서 마젠타 조건
+    # 마젠타: B 높고, R 높고, G 매우 낮음
+    magenta_bgr = np.zeros((h, w), dtype=np.uint8)
+    # 순수 마젠타: B>120, R>120, G<100, G < min(B,R)*0.6
     min_br = np.minimum(lb, lr)
-    purple_cond = (lb > 60) & (lr > 60) & (lg < min_br - 15)
-    purple_bgr[purple_cond] = 255
+    magenta_cond = (lb > 120) & (lr > 120) & (lg < 100) & (lg < min_br * 0.6)
+    magenta_bgr[magenta_cond] = 255
 
-    # 방법 C: 차이 이미지에서 보라색 검출
+    # 방법 C: 차이 이미지에서 마젠타 검출
     diff_hsv = cv.cvtColor(diff, cv.COLOR_BGR2HSV)
-    # diff가 보라색인 곳 = 보라색이 추가된 곳
-    purple_diff = cv.inRange(diff_hsv, np.array([100, 20, 15]), np.array([175, 255, 255]))
+    magenta_diff1 = cv.inRange(diff_hsv, np.array([140, 30, 20]), np.array([180, 255, 255]))
+    magenta_diff2 = cv.inRange(diff_hsv, np.array([0, 30, 20]), np.array([10, 255, 255]))
+    magenta_diff = cv.bitwise_or(magenta_diff1, magenta_diff2)
 
-    # 방법 D: 라벨에서 보라색이고 + 원본과 차이가 큰 곳
-    diff_significant = diff_gray > 8  # 작은 압축 아티팩트 제거
-    purple_combined = np.zeros((h, w), dtype=np.uint8)
-
-    # 각 방법의 결과를 diff_significant와 AND
-    for pm in [purple_hsv1, purple_bgr, purple_diff]:
-        filtered = cv.bitwise_and(pm, pm, mask=diff_significant.astype(np.uint8) * 255)
-        purple_combined = cv.bitwise_or(purple_combined, filtered)
-
-    # === 3단계: 압축 아티팩트 추가 필터링 ===
-    # 보라색이 아닌 단순 밝기 차이 (압축 아티팩트)를 제거
-    # 압축 아티팩트: 모든 채널이 비슷하게 변함 (회색조 노이즈)
-    # 보라색 윤곽선: R/B 채널이 G보다 크게 변함
+    # 방법 D: BGR diff에서 마젠타 특성 (B,R 변화 크고 G 변화 작음)
     diff_b = diff[:,:,0].astype(np.float32)
     diff_g = diff[:,:,1].astype(np.float32)
     diff_r = diff[:,:,2].astype(np.float32)
+    # 마젠타 추가: B,R이 크게 증가, G는 적게 변함
+    magenta_diff_bgr = np.zeros((h, w), dtype=np.uint8)
+    magenta_diff_cond = (diff_b > 30) & (diff_r > 30) & (diff_b + diff_r > diff_g * 2.5)
+    magenta_diff_bgr[magenta_diff_cond] = 255
 
-    # 보라색 차이 특성: (diff_b + diff_r) >> diff_g
+    # 원본과 차이가 있는 곳만 (압축 아티팩트 제거)
+    diff_significant = (diff_gray > 15).astype(np.uint8) * 255
+
+    # 모든 방법 결합 (OR)
+    magenta_combined = np.zeros((h, w), dtype=np.uint8)
+    for pm in [magenta_hsv, magenta_bgr, magenta_diff, magenta_diff_bgr]:
+        filtered = cv.bitwise_and(pm, diff_significant)
+        magenta_combined = cv.bitwise_or(magenta_combined, filtered)
+
+    # === 3단계: 압축 아티팩트 필터링 ===
+    # 마젠타는 B,R 변화가 크고 G 변화가 작음
     color_diff_ratio = (diff_b + diff_r + 1) / (diff_g + 1)
-    # 보라색은 B,R이 크고 G가 작으므로 ratio > 2
-    color_filter = color_diff_ratio > 1.5
-    purple_combined = cv.bitwise_and(purple_combined, purple_combined,
-                                      mask=color_filter.astype(np.uint8) * 255)
+    color_filter = (color_diff_ratio > 1.8).astype(np.uint8) * 255
+    magenta_combined = cv.bitwise_and(magenta_combined, color_filter)
 
     # === 4단계: 형태학적 연산으로 윤곽선 연결 ===
-    # 이미지 크기에 따라 커널 크기 조정
     img_diag = np.sqrt(h*h + w*w)
-    close_k = max(3, int(img_diag * 0.05))
+    close_k = max(3, int(img_diag * 0.06))
     if close_k % 2 == 0:
         close_k += 1
 
     kernel_close = cv.getStructuringElement(cv.MORPH_ELLIPSE, (close_k, close_k))
-    closed = cv.morphologyEx(purple_combined, cv.MORPH_CLOSE, kernel_close)
+    closed = cv.morphologyEx(magenta_combined, cv.MORPH_CLOSE, kernel_close)
 
     # dilate로 끊긴 부분 연결
-    dilate_k = max(3, int(img_diag * 0.03))
+    dilate_k = max(3, int(img_diag * 0.04))
     if dilate_k % 2 == 0:
         dilate_k += 1
     kernel_dilate = cv.getStructuringElement(cv.MORPH_ELLIPSE, (dilate_k, dilate_k))
@@ -143,32 +150,40 @@ def extract_gt_improved(label_img, orig_img, debug_dir=None, name=""):
     filled = np.zeros((h, w), dtype=np.uint8)
     for cnt in contours:
         area = cv.contourArea(cnt)
-        if area > max(10, h * w * 0.005):  # 이미지 면적의 0.5% 이상
+        if area > max(10, img_area * 0.005):
             cv.drawContours(filled, [cnt], -1, 255, -1)
 
-    # === 6단계: 폴백 - 윤곽선이 너무 작거나 없으면 직접 diff 마스크 사용 ===
+    # === 6단계: 두꺼운 마킹 보정 (erode) ===
+    # 마젠타 선이 두꺼우므로 약간 축소하여 실제 영역에 가깝게 조정
     filled_area = np.count_nonzero(filled)
-    img_area = h * w
+    if filled_area > img_area * 0.05:  # 충분히 큰 영역이 검출된 경우만
+        erode_k = max(1, int(img_diag * 0.015))
+        if erode_k % 2 == 0:
+            erode_k += 1
+        if erode_k >= 3:
+            kernel_erode = cv.getStructuringElement(cv.MORPH_ELLIPSE, (erode_k, erode_k))
+            filled = cv.erode(filled, kernel_erode, iterations=1)
 
+    # === 7단계: 폴백 - 검출 실패 시 diff 기반 ===
+    filled_area = np.count_nonzero(filled)
     if filled_area < img_area * 0.01:
-        # 윤곽선 검출 실패 → diff threshold 기반 폴백
-        # 적응형 임계값: diff의 상위 N% 픽셀
+        # 마젠타 검출 실패 → diff 기반 폴백
         if diff_gray.max() > 0:
-            # 상위 30% 픽셀
             sorted_vals = np.sort(diff_gray[diff_gray > 0])
             if len(sorted_vals) > 0:
                 thresh_val = sorted_vals[max(0, int(len(sorted_vals) * 0.3))]
-                thresh_val = max(thresh_val, 20)
+                thresh_val = max(thresh_val, 25)
                 _, filled = cv.threshold(diff_gray, thresh_val, 255, cv.THRESH_BINARY)
                 filled = clean_mask(filled, min_area=max(5, int(img_area * 0.005)))
 
     # 디버그 저장
     if debug_dir:
         os.makedirs(debug_dir, exist_ok=True)
-        cv.imwrite(os.path.join(debug_dir, f"{name}_purple_hsv.png"), purple_hsv1)
-        cv.imwrite(os.path.join(debug_dir, f"{name}_purple_bgr.png"), purple_bgr)
-        cv.imwrite(os.path.join(debug_dir, f"{name}_purple_diff.png"), purple_diff)
-        cv.imwrite(os.path.join(debug_dir, f"{name}_purple_combined.png"), purple_combined)
+        cv.imwrite(os.path.join(debug_dir, f"{name}_magenta_hsv.png"), magenta_hsv)
+        cv.imwrite(os.path.join(debug_dir, f"{name}_magenta_bgr.png"), magenta_bgr)
+        cv.imwrite(os.path.join(debug_dir, f"{name}_magenta_diff.png"), magenta_diff)
+        cv.imwrite(os.path.join(debug_dir, f"{name}_magenta_diff_bgr.png"), magenta_diff_bgr)
+        cv.imwrite(os.path.join(debug_dir, f"{name}_magenta_combined.png"), magenta_combined)
         cv.imwrite(os.path.join(debug_dir, f"{name}_closed.png"), closed)
         cv.imwrite(os.path.join(debug_dir, f"{name}_dilated.png"), dilated)
         cv.imwrite(os.path.join(debug_dir, f"{name}_gt_final.png"), filled)
@@ -180,7 +195,6 @@ def extract_gt_improved(label_img, orig_img, debug_dir=None, name=""):
         overlay = cv.addWeighted(overlay, 0.6, colored, 0.4, 0)
         cv.imwrite(os.path.join(debug_dir, f"{name}_gt_overlay.png"), overlay)
 
-        # GT 비율 기록
         gt_pct = np.count_nonzero(filled) / img_area * 100
         print(f"  {name}: GT 영역 = {np.count_nonzero(filled)}px ({gt_pct:.1f}%)")
 
@@ -604,6 +618,150 @@ def run_all_methods(img, gt_mask, fname):
                 mask = (backproj > t).astype(np.uint8) * 255
                 evaluate(mask, f"BackProj_t{t}")
 
+    # ==============================
+    # 카테고리 19: Normalized RGB (산업용 AOI 표준)
+    # ==============================
+    total_f = b.astype(np.float32) + g.astype(np.float32) + r.astype(np.float32)
+    total_f = np.maximum(total_f, 1.0)
+    norm_b = b.astype(np.float32) / total_f
+    norm_g = g.astype(np.float32) / total_f
+    norm_r = r.astype(np.float32) / total_f
+
+    # b 비율 임계값
+    for t in [0.35, 0.38, 0.40, 0.42, 0.45, 0.48, 0.50, 0.55]:
+        mask = (norm_b >= t).astype(np.uint8) * 255
+        evaluate(mask, f"NormRGB_b_gt_{t}")
+
+    # r 비율 임계값 (Red가 낮은 = 솔더 아닌 영역 제외)
+    for t in [0.25, 0.30, 0.35]:
+        mask = (norm_r < t).astype(np.uint8) * 255
+        evaluate(mask, f"NormRGB_r_lt_{t}")
+
+    # b-r 차이 (Blue 비율이 Red보다 높은 영역)
+    diff_br = norm_b - norm_r
+    for t in [0.05, 0.08, 0.10, 0.12, 0.15, 0.20]:
+        mask = (diff_br >= t).astype(np.uint8) * 255
+        evaluate(mask, f"NormRGB_b-r_gt_{t}")
+
+    # b-g 차이 (Blue 비율이 Green보다 높은 영역)
+    diff_bg = norm_b - norm_g
+    for t in [0.05, 0.08, 0.10, 0.15]:
+        mask = (diff_bg >= t).astype(np.uint8) * 255
+        evaluate(mask, f"NormRGB_b-g_gt_{t}")
+
+    # ==============================
+    # 카테고리 20: 채널 비율 (B/G, B/R 등)
+    # ==============================
+    g_f = np.maximum(g.astype(np.float32), 1.0)
+    r_f = np.maximum(r.astype(np.float32), 1.0)
+    b_f = np.maximum(b.astype(np.float32), 1.0)
+
+    ratio_bg = b.astype(np.float32) / g_f
+    for t in [1.2, 1.3, 1.5, 1.8, 2.0]:
+        mask = (ratio_bg >= t).astype(np.uint8) * 255
+        evaluate(mask, f"Ratio_BG_gt_{t}")
+
+    ratio_br = b.astype(np.float32) / r_f
+    for t in [1.2, 1.5, 2.0]:
+        mask = (ratio_br >= t).astype(np.uint8) * 255
+        evaluate(mask, f"Ratio_BR_gt_{t}")
+
+    # B/G와 B/R 동시 조건
+    for t in [1.1, 1.2, 1.3]:
+        mask = ((ratio_bg >= t) & (ratio_br >= t)).astype(np.uint8) * 255
+        evaluate(mask, f"Ratio_BG_and_BR_gt_{t}")
+
+    # ==============================
+    # 카테고리 21: Bilateral Filter + 기존 방법
+    # ==============================
+    for d_val in [5, 9]:
+        denoised = cv.bilateralFilter(img, d_val, 75, 75)
+        den_b = denoised[:,:,0]
+        den_hsv = cv.cvtColor(denoised, cv.COLOR_BGR2HSV)
+        den_s = den_hsv[:,:,1]
+
+        # Bilateral + Otsu Blue inv
+        _, m = cv.threshold(den_b, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU)
+        evaluate(m, f"Bilateral_d{d_val}_Otsu_Blue_inv")
+
+        # Bilateral + CLAHE Blue inv
+        for cl in [4.0, 8.0]:
+            clahe = cv.createCLAHE(clipLimit=cl, tileGridSize=(4, 4))
+            enhanced = clahe.apply(den_b)
+            _, m = cv.threshold(enhanced, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU)
+            evaluate(m, f"Bilateral_d{d_val}_CLAHE_Blue_inv_cl{cl}")
+
+        # Bilateral + Saturation
+        for lo in [30, 50]:
+            m = cv.inRange(den_s, lo, 255)
+            evaluate(m, f"Bilateral_d{d_val}_Sat_{lo}-255")
+
+        # Bilateral + Normalized RGB
+        den_total = denoised[:,:,0].astype(np.float32) + denoised[:,:,1].astype(np.float32) + denoised[:,:,2].astype(np.float32)
+        den_total = np.maximum(den_total, 1.0)
+        den_norm_b = denoised[:,:,0].astype(np.float32) / den_total
+        for t in [0.38, 0.40, 0.42, 0.45]:
+            m = (den_norm_b >= t).astype(np.uint8) * 255
+            evaluate(m, f"Bilateral_d{d_val}_NormRGB_b_gt_{t}")
+
+    # ==============================
+    # 카테고리 22: NLM + 기존 방법
+    # ==============================
+    try:
+        nlm = cv.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
+        nlm_b = nlm[:,:,0]
+        nlm_hsv = cv.cvtColor(nlm, cv.COLOR_BGR2HSV)
+        nlm_s = nlm_hsv[:,:,1]
+
+        _, m = cv.threshold(nlm_b, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU)
+        evaluate(m, "NLM_Otsu_Blue_inv")
+
+        for cl in [4.0, 8.0]:
+            clahe = cv.createCLAHE(clipLimit=cl, tileGridSize=(4, 4))
+            enhanced = clahe.apply(nlm_b)
+            _, m = cv.threshold(enhanced, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU)
+            evaluate(m, f"NLM_CLAHE_Blue_inv_cl{cl}")
+
+        m = cv.inRange(nlm_s, 30, 255)
+        evaluate(m, "NLM_Sat_30-255")
+
+        nlm_total = nlm[:,:,0].astype(np.float32) + nlm[:,:,1].astype(np.float32) + nlm[:,:,2].astype(np.float32)
+        nlm_total = np.maximum(nlm_total, 1.0)
+        nlm_norm_b = nlm[:,:,0].astype(np.float32) / nlm_total
+        for t in [0.38, 0.40, 0.42]:
+            m = (nlm_norm_b >= t).astype(np.uint8) * 255
+            evaluate(m, f"NLM_NormRGB_b_gt_{t}")
+    except Exception:
+        pass  # NLM이 실패하면 건너뜀
+
+    # ==============================
+    # 카테고리 23: 그라데이션 패턴
+    # ==============================
+    # Blue gradient 크기 (필렛 전환 영역)
+    grad_b_x = cv.Sobel(norm_b, cv.CV_32F, 1, 0, ksize=3)
+    grad_b_y = cv.Sobel(norm_b, cv.CV_32F, 0, 1, ksize=3)
+    grad_b_mag = np.sqrt(grad_b_x**2 + grad_b_y**2)
+    grad_b_norm = cv.normalize(grad_b_mag, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
+
+    for t in [20, 30, 50]:
+        base = cv.threshold(grad_b_norm, t, 255, cv.THRESH_BINARY)[1]
+        kern = cv.getStructuringElement(cv.MORPH_ELLIPSE, (5, 5))
+        m = cv.dilate(base, kern, iterations=2)
+        evaluate(m, f"GradPattern_NormB_t{t}")
+
+    # Hue gradient (색상 전환 패턴)
+    h_f = h_ch.astype(np.float32)
+    grad_h_x = cv.Sobel(h_f, cv.CV_32F, 1, 0, ksize=3)
+    grad_h_y = cv.Sobel(h_f, cv.CV_32F, 0, 1, ksize=3)
+    grad_h_mag = np.sqrt(grad_h_x**2 + grad_h_y**2)
+    grad_h_norm = cv.normalize(grad_h_mag, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
+
+    for t in [20, 40]:
+        base = cv.threshold(grad_h_norm, t, 255, cv.THRESH_BINARY)[1]
+        kern = cv.getStructuringElement(cv.MORPH_ELLIPSE, (5, 5))
+        m = cv.dilate(base, kern, iterations=2)
+        evaluate(m, f"GradPattern_Hue_t{t}")
+
     return results
 
 
@@ -612,7 +770,7 @@ def run_all_methods(img, gt_mask, fname):
 # ============================================================
 def main():
     print("=" * 70)
-    print("개선된 솔더 페이스트 검출 분석 v2")
+    print("개선된 솔더 페이스트 검출 분석 v4 (마젠타 GT)")
     print("=" * 70)
 
     all_results = {}
@@ -625,26 +783,45 @@ def main():
     # Phase 1: GT 마스크 추출
     # ============================================================
     print("\n" + "=" * 70)
-    print("Phase 1: GT 마스크 추출 (개선된 보라색 윤곽선 검출)")
+    print("Phase 1: GT 마스크 추출 (마젠타 색상 검출)")
     print("=" * 70)
 
     gt_masks = {}
     for fname in fnames:
         test_path = os.path.join(TEST_DIR, fname)
-        label_path = os.path.join(LABEL_DIR, fname)
+        base = os.path.splitext(fname)[0]
 
         img = cv.imread(test_path)
-        label = cv.imread(label_path)
+        if img is None:
+            continue
 
-        if img is None or label is None:
+        print(f"\n  처리: {fname} (크기: {img.shape})")
+
+        # 1순위: LabelMe 변환 바이너리 마스크 (annotations/gt_masks/)
+        mask_path = os.path.join(GT_MASK_DIR, fname)
+        if os.path.exists(mask_path):
+            gt_mask = cv.imread(mask_path, cv.IMREAD_GRAYSCALE)
+            if gt_mask is not None:
+                # 이미지 크기 맞추기
+                if gt_mask.shape[:2] != img.shape[:2]:
+                    gt_mask = cv.resize(gt_mask, (img.shape[1], img.shape[0]))
+                gt_mask = (gt_mask > 127).astype(np.uint8) * 255
+                area_pct = np.count_nonzero(gt_mask) / gt_mask.size * 100
+                print(f"    -> LabelMe 마스크 로드 (영역: {area_pct:.1f}%)")
+                gt_masks[fname] = gt_mask
+                continue
+
+        # 2순위: 기존 마젠타 라벨에서 추출 (폴백)
+        label_path = os.path.join(LABEL_DIR, fname)
+        label = cv.imread(label_path)
+        if label is None:
+            print(f"    [!] 라벨 없음: {fname}")
             continue
 
         if img.shape != label.shape:
             label = cv.resize(label, (img.shape[1], img.shape[0]))
 
-        base = os.path.splitext(fname)[0]
-        print(f"\n  처리: {fname} (크기: {img.shape})")
-
+        print(f"    -> 마젠타 라벨 추출 (폴백)")
         gt_mask = extract_gt_improved(label, img, debug_dir=gt_debug_dir, name=base)
         gt_masks[fname] = gt_mask
 
@@ -652,7 +829,7 @@ def main():
     # Phase 2: 모든 검출 방법 실행
     # ============================================================
     print("\n" + "=" * 70)
-    print("Phase 2: 200+ 검출 방법 IoU 평가")
+    print("Phase 2: 330+ 검출 방법 IoU 평가")
     print("=" * 70)
 
     for fname in fnames:
@@ -841,13 +1018,13 @@ def main():
         'per_image_results': json_results,
     }
 
-    with open(os.path.join(OUTPUT_DIR, "analysis_v2_results.json"), 'w', encoding='utf-8') as f:
+    with open(os.path.join(OUTPUT_DIR, "analysis_v4_results.json"), 'w', encoding='utf-8') as f:
         json.dump(output_data, f, indent=2, ensure_ascii=False)
 
     # 텍스트 리포트 저장
-    report_path = os.path.join(OUTPUT_DIR, "analysis_v2_report.txt")
+    report_path = os.path.join(OUTPUT_DIR, "analysis_v4_report.txt")
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write("개선된 솔더 페이스트 검출 분석 리포트 v2\n")
+        f.write("개선된 솔더 페이스트 검출 분석 리포트 v4 (마젠타 GT)\n")
         f.write("=" * 90 + "\n\n")
 
         f.write("Top 30 방법 (평균 IoU 순)\n")

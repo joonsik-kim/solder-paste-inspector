@@ -30,6 +30,19 @@ calibration/
 *.swp
 *.swo
 
+# 분석 결과 (재생성 가능, 용량 큼)
+analysis_results/
+analysis_results_v*/
+
+# GT 마스크 (LabelMe JSON에서 재생성 가능)
+annotations/gt_masks/
+
+# 원본 이미지 백업
+images_main/
+
+# Claude Code 세션 데이터
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db

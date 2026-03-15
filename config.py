@@ -30,12 +30,27 @@ class Config:
         self.HEIGHT_THRESHOLD_MAX = 255  # 최대 높이
 
         # 검출 방법 선택 (HEIGHT_MAP_MODE=True일 때)
-        # 'ensemble': 앙상블 투표 (권장, 가장 안정적)
-        # 'otsu_blue': Blue 채널 Otsu 반전 (최고 평균 IoU)
-        # 'clahe_blue': CLAHE + Blue Otsu 반전 (불균일 조명에 강함)
-        # 'adaptive': 적응형 임계값 (국소 변화에 강함)
+        # 'ensemble_v4': v4 앙상블 (Normalized RGB + 노이즈 제거, 권장)
+        # 'ensemble': v3 앙상블 투표 (하위 호환)
+        # 'norm_rgb': Normalized RGB 단독 (산업용 AOI 표준)
+        # 'otsu_blue': Blue 채널 Otsu 반전
+        # 'clahe_blue': CLAHE + Blue Otsu 반전
+        # 'adaptive': 적응형 임계값
         # 'legacy': 기존 방식 (단순 Blue 채널 범위)
-        self.DETECTION_METHOD = 'ensemble'
+        self.DETECTION_METHOD = 'ensemble_v4'
+
+        # v4 노이즈 제거 설정
+        # 'bilateral': 엣지 보존 노이즈 제거 (빠름, 권장)
+        # 'nlm': Non-local Means (강력, 느림)
+        # 'none': 노이즈 제거 안 함
+        self.DENOISE_METHOD = 'bilateral'
+
+        # Normalized RGB 임계값 (norm_rgb 방법 사용 시)
+        self.NORM_RGB_THRESHOLD = 0.40
+
+        # GT 마스크 디렉토리 (LabelMe 변환 바이너리 마스크)
+        # 이 경로에 마스크가 있으면 마젠타 라벨 대신 사용
+        self.GT_MASK_DIR = 'annotations/gt_masks'
 
         # HSV 색상 범위 (2D 색상 모드용, HEIGHT_MAP_MODE=False일 때 사용)
         # 주의: 실제 이미지에 맞춰 조정 필요
